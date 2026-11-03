@@ -28,10 +28,10 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
 
-    'anthropic' => [
-        'key' => env('ANTHROPIC_API_KEY'),
-        'model' => env('ANTHROPIC_MODEL', 'claude-opus-5'),
-        'effort' => env('ANTHROPIC_EFFORT', 'low'),
+    'companion' => [
+        'provider' => env('COMPANION_AI_PROVIDER', 'gemini'),
+        'text_model' => env('COMPANION_TEXT_MODEL', 'gemini-3.1-flash-lite'),
+        'image_model' => env('COMPANION_IMAGE_MODEL', 'gemini-nano-banana-2.1'),
     ],
 
     'slack' => [

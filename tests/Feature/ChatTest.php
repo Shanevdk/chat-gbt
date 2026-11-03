@@ -1,15 +1,22 @@
 <?php
 
+use App\Ai\Agents\CompanionAgent;
+use App\Ai\Tools\StartCall;
 use App\MessageChannel;
 use App\MessageRole;
 use App\Models\Companion;
 use App\Models\CompanionPhoto;
 use App\Models\Message;
 use App\Models\User;
-use GuzzleHttp\Psr7\Response;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
+use Laravel\Ai\Exceptions\AiException;
+use Laravel\Ai\Exceptions\RateLimitedException;
+use Laravel\Ai\Image;
+use Laravel\Ai\Prompts\AgentPrompt;
+use Laravel\Ai\Prompts\ImagePrompt;
+use Laravel\Ai\Responses\Data\ToolCall;
 
 test('guests are redirected to the login page', function () {
     $this->get(route('chat'))->assertRedirect(route('login'));
@@ -45,15 +52,14 @@ test('the chat page only shows the user\'s own messages', function () {
 
 test('she replies to a text, splitting separate texts into separate messages', function () {
     $companion = Companion::factory()->create(['name' => 'Luna', 'personality' => 'Loves astronomy.']);
-    $requests = fakeClaude(claudeReply([['type' => 'text', 'text' => "heyyy you\n\nhow was the interview??", 'citations' => null]]));
+    CompanionAgent::fake(["heyyy you\n\nhow was the interview??"]);
 
-    $response = $this->actingAs($companion->user)->postJson(route('chat.messages.store'), [
+    $this->actingAs($companion->user)->postJson(route('chat.messages.store'), [
         'body' => 'Hi Luna!',
         'channel' => 'text',
         'timezone' => 'Etc/GMT+5',
-    ]);
-
-    $response->assertOk()
+    ])
+        ->assertOk()
         ->assertJsonPath('sent.body', 'Hi Luna!')
         ->assertJsonPath('replies.0.body', 'heyyy you')
         ->assertJsonPath('replies.1.body', 'how was the interview??')
@@ -63,34 +69,23 @@ test('she replies to a text, splitting separate texts into separate messages', f
         ->toBe(['heyyy you', 'how was the interview??'])
         ->and($companion->fresh()->timezone)->toBe('Etc/GMT+5');
 
-    $request = claudeRequest($requests);
-
-    expect($request['model'])->toBe('claude-opus-5')
-        ->and($request['fallbacks'])->toBe('default')
-        ->and($requests[0]['request']->getHeaderLine('anthropic-beta'))->toBe('server-side-fallback-2026-07-01')
-        ->and($request['system'])->toContain('You are Luna')
-        ->and($request['system'])->toContain('Loves astronomy.')
-        ->and(end($request['messages'])['content'])->toEndWith('Hi Luna!');
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->contains('Hi Luna!')
+        && str_contains((string) $prompt->agent->instructions(), 'You are Luna')
+        && str_contains((string) $prompt->agent->instructions(), 'Loves astronomy.'));
 });
 
 test('she can see a photo the user sends', function () {
     Storage::fake();
     $companion = Companion::factory()->create();
-    $requests = fakeClaude(claudeReply([['type' => 'text', 'text' => 'omg is that your dog?', 'citations' => null]]));
+    CompanionAgent::fake(['omg is that your dog?']);
 
     $this->actingAs($companion->user)->post(route('chat.messages.store'), [
         'image' => UploadedFile::fake()->image('dog.jpg'),
         'channel' => 'text',
     ], ['Accept' => 'application/json'])->assertOk();
 
-    $sent = $companion->messages()->where('role', MessageRole::User)->sole();
-    Storage::assertExists($sent->image_path);
-
-    $content = end(claudeRequest($requests)['messages'])['content'];
-
-    expect($content[0]['type'])->toBe('image')
-        ->and($content[0]['source']['media_type'])->toBe('image/jpeg')
-        ->and($content[0]['source']['data'])->toBe(base64_encode(Storage::get($sent->image_path)));
+    Storage::assertExists($companion->messages()->where('role', MessageRole::User)->sole()->image_path);
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->attachments->count() === 1);
 });
 
 test('only the three most recent photos are sent as images', function () {
@@ -102,71 +97,120 @@ test('only the three most recent photos are sent as images', function () {
         Message::factory()->for($companion)->create(['body' => "Photo {$number}", 'image_path' => "chat/photo-{$number}.jpg"]);
     }
 
-    $requests = fakeClaude(claudeReply([['type' => 'text', 'text' => 'cute', 'citations' => null]]));
+    CompanionAgent::fake(['cute']);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Thoughts?', 'channel' => 'text'])
         ->assertOk();
 
-    $messages = claudeRequest($requests)['messages'];
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->attachments->count() === 3
+        && $prompt->contains('(sent a photo) Photo 1'));
+});
 
-    expect($messages[0]['content'])->toBeString()->toContain('(sent a photo) Photo 1')
-        ->and($messages[1]['content'][0]['type'])->toBe('image')
-        ->and($messages[3]['content'][0]['type'])->toBe('image');
+test('she can take and send a new selfie', function () {
+    Storage::fake();
+    Image::fake();
+    $companion = Companion::factory()->create(['appearance' => 'Short red hair and green eyes.']);
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'send_selfie', ['description' => 'Beach selfie in a sun hat']),
+        'miss the beach',
+    ]);
+
+    $this->actingAs($companion->user)
+        ->postJson(route('chat.messages.store'), ['body' => 'Send me a pic', 'channel' => 'text'])
+        ->assertOk()
+        ->assertJsonCount(2, 'replies')
+        ->assertJsonPath('replies.0.image_caption', 'Beach selfie in a sun hat')
+        ->assertJsonPath('replies.1.body', 'miss the beach');
+
+    $selfie = $companion->messages()->whereNotNull('image_path')->sole();
+
+    Storage::assertExists($selfie->image_path);
+    Image::assertGenerated(fn (ImagePrompt $prompt) => $prompt->contains('Beach selfie in a sun hat')
+        && $prompt->contains('Short red hair and green eyes.')
+        && $prompt->attachments->isEmpty());
+
+    expect($companion->fresh()->avatar_path)->toBe($selfie->image_path);
+});
+
+test('her selfies use her profile picture so she looks the same', function () {
+    Storage::fake();
+    Image::fake();
+    Storage::put('companions/avatars/face.jpg', UploadedFile::fake()->image('face.jpg')->getContent());
+    $companion = Companion::factory()->create(['avatar_path' => 'companions/avatars/face.jpg']);
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'send_selfie', ['description' => 'Coffee shop selfie']),
+        'hi',
+    ]);
+
+    $this->actingAs($companion->user)
+        ->postJson(route('chat.messages.store'), ['body' => 'Pic?', 'channel' => 'text'])
+        ->assertOk();
+
+    Image::assertGenerated(fn (ImagePrompt $prompt) => $prompt->attachments->count() === 1
+        && $prompt->contains('exactly the same as in the reference photo'));
+
+    expect($companion->fresh()->avatar_path)->toBe('companions/avatars/face.jpg');
+});
+
+test('a failed selfie does not break her reply', function () {
+    Storage::fake();
+    Image::fake(fn () => throw new AiException('Blocked by safety filters.'));
+    $companion = Companion::factory()->create();
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'send_selfie', ['description' => 'Gym selfie']),
+        'ugh my camera is being weird',
+    ]);
+
+    $this->actingAs($companion->user)
+        ->postJson(route('chat.messages.store'), ['body' => 'Pic?', 'channel' => 'text'])
+        ->assertOk()
+        ->assertJsonCount(1, 'replies')
+        ->assertJsonPath('replies.0.body', 'ugh my camera is being weird');
+
+    expect($companion->messages()->whereNotNull('image_path')->exists())->toBeFalse();
 });
 
 test('she can send a photo from her camera roll', function () {
     $companion = Companion::factory()->create();
     $photo = CompanionPhoto::factory()->for($companion)->create(['caption' => 'Beach selfie']);
-    $requests = fakeClaude(
-        claudeReply([
-            ['type' => 'text', 'text' => 'here you go', 'citations' => null],
-            ['type' => 'tool_use', 'id' => 'toolu_1', 'name' => 'send_photo', 'input' => ['photo_id' => $photo->id]],
-        ], 'tool_use'),
-        claudeReply([['type' => 'text', 'text' => 'miss the beach', 'citations' => null]]),
-    );
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'send_photo', ['photo_id' => $photo->id]),
+        'miss the beach',
+    ]);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Send me a pic', 'channel' => 'text'])
         ->assertOk()
-        ->assertJsonCount(3, 'replies')
-        ->assertJsonPath('replies.1.image_caption', 'Beach selfie')
-        ->assertJsonPath('replies.2.body', 'miss the beach');
+        ->assertJsonPath('replies.0.image_caption', 'Beach selfie');
 
-    expect($companion->messages()->whereNotNull('image_path')->sole()->image_path)->toBe($photo->path)
-        ->and(claudeRequest($requests)['tools'][1]['description'])->toContain("{$photo->id}: Beach selfie")
-        ->and(end(claudeRequest($requests, 1)['messages'])['content'][0])->toMatchArray([
-            'type' => 'tool_result',
-            'tool_use_id' => 'toolu_1',
-            'content' => 'Photo sent.',
-        ]);
+    expect($companion->messages()->whereNotNull('image_path')->sole()->image_path)->toBe($photo->path);
 });
 
 test('she cannot send a photo from another companion\'s camera roll', function () {
     $companion = Companion::factory()->create();
     CompanionPhoto::factory()->for($companion)->create();
     $otherPhoto = CompanionPhoto::factory()->create();
-    $requests = fakeClaude(
-        claudeReply([['type' => 'tool_use', 'id' => 'toolu_1', 'name' => 'send_photo', 'input' => ['photo_id' => $otherPhoto->id]]], 'tool_use'),
-        claudeReply([['type' => 'text', 'text' => 'hmm my camera is acting up', 'citations' => null]]),
-    );
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'send_photo', ['photo_id' => $otherPhoto->id]),
+        'hmm my camera roll is acting up',
+    ]);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Send me a pic', 'channel' => 'text'])
         ->assertOk()
         ->assertJsonCount(1, 'replies');
 
-    expect($companion->messages()->whereNotNull('image_path')->exists())->toBeFalse()
-        ->and(end(claudeRequest($requests, 1)['messages'])['content'][0]['content'])->toBe('That photo is not in your camera roll.');
+    expect($companion->messages()->whereNotNull('image_path')->exists())->toBeFalse();
 });
 
 test('she remembers facts about the user across conversations', function () {
     $companion = Companion::factory()->create();
-    $requests = fakeClaude(
-        claudeReply([['type' => 'tool_use', 'id' => 'toolu_1', 'name' => 'remember', 'input' => ['fact' => 'Has a job interview on Friday']]], 'tool_use'),
-        claudeReply([['type' => 'text', 'text' => 'good luck!!', 'citations' => null]]),
-        claudeReply([['type' => 'text', 'text' => 'so how did it go?', 'citations' => null]]),
-    );
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'remember', ['fact' => 'Has a job interview on Friday']),
+        'good luck!!',
+        'so how did it go?',
+    ]);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'I have an interview Friday', 'channel' => 'text'])
@@ -176,15 +220,16 @@ test('she remembers facts about the user across conversations', function () {
 
     $this->postJson(route('chat.messages.store'), ['body' => 'Hey', 'channel' => 'text'])->assertOk();
 
-    expect(claudeRequest($requests, 2)['system'])->toContain('- Has a job interview on Friday');
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->contains('Hey')
+        && str_contains((string) $prompt->agent->instructions(), '- Has a job interview on Friday'));
 });
 
 test('she can call the user', function () {
     $companion = Companion::factory()->create();
-    fakeClaude(
-        claudeReply([['type' => 'tool_use', 'id' => 'toolu_1', 'name' => 'start_call', 'input' => []]], 'tool_use'),
-        claudeReply([['type' => 'text', 'text' => 'pick up!', 'citations' => null]]),
-    );
+    CompanionAgent::fake([
+        new ToolCall('call_1', 'start_call', []),
+        'pick up!',
+    ]);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Call me?', 'channel' => 'text'])
@@ -194,6 +239,7 @@ test('she can call the user', function () {
 
 test('a message needs text or a photo', function () {
     $companion = Companion::factory()->create();
+    CompanionAgent::fake()->preventStrayPrompts();
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['channel' => 'text'])
@@ -201,19 +247,17 @@ test('a message needs text or a photo', function () {
         ->assertJsonValidationErrors(['body' => 'The body field is required when image is not present.']);
 
     expect($companion->messages()->exists())->toBeFalse();
+    CompanionAgent::assertNeverPrompted();
 });
 
-test('the user is told when Claude rejects the API key', function () {
+test('the user is told when the AI provider is busy', function () {
     $companion = Companion::factory()->create();
-    fakeClaude(new Response(401, ['Content-Type' => 'application/json'], (string) json_encode([
-        'type' => 'error',
-        'error' => ['type' => 'authentication_error', 'message' => 'invalid x-api-key'],
-    ])));
+    CompanionAgent::fake(fn () => throw RateLimitedException::forProvider('gemini', 429));
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Hello?', 'channel' => 'text'])
         ->assertServiceUnavailable()
-        ->assertJsonPath('message', 'Claude needs a valid API key. Set ANTHROPIC_API_KEY in your .env file.');
+        ->assertJsonPath('message', "She's getting a lot of messages right now. Try again in a moment.");
 
     expect($companion->messages()->sole()->body)->toBe('Hello?');
 });
@@ -221,7 +265,7 @@ test('the user is told when Claude rejects the API key', function () {
 test('starting a call logs it and she greets the user in a single spoken reply', function () {
     $user = User::factory()->create(['name' => 'Sam']);
     $companion = Companion::factory()->for($user)->create(['name' => 'Luna']);
-    $requests = fakeClaude(claudeReply([['type' => 'text', 'text' => "Hey you!\n\nI was just thinking about you.", 'citations' => null]]));
+    CompanionAgent::fake(["Hey you!\n\nI was just thinking about you."]);
 
     $this->actingAs($user)
         ->postJson(route('chat.calls.start'), ['incoming' => true])
@@ -231,20 +275,19 @@ test('starting a call logs it and she greets the user in a single spoken reply',
         ->assertJsonPath('replies.0.body', "Hey you!\n\nI was just thinking about you.")
         ->assertJsonPath('replies.0.channel', MessageChannel::Call->value);
 
-    $toolNames = array_column(claudeRequest($requests)['tools'], 'name');
-
-    expect($toolNames)->not->toContain('start_call');
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->contains('(Luna called Sam)')
+        && collect($prompt->agent->tools())->doesntContain(fn (object $tool): bool => $tool instanceof StartCall));
 });
 
 test('voice call messages are tagged so she knows she is on a call', function () {
     $companion = Companion::factory()->create();
-    $requests = fakeClaude(claudeReply([['type' => 'text', 'text' => 'I can hear you', 'citations' => null]]));
+    CompanionAgent::fake(['I can hear you']);
 
     $this->actingAs($companion->user)
         ->postJson(route('chat.messages.store'), ['body' => 'Can you hear me?', 'channel' => 'call'])
         ->assertOk();
 
-    expect(end(claudeRequest($requests)['messages'])['content'])->toContain('· voice call] Can you hear me?');
+    CompanionAgent::assertPrompted(fn (AgentPrompt $prompt) => $prompt->contains('· voice call] Can you hear me?'));
 });
 
 test('ending a call logs how long it lasted', function () {

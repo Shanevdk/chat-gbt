@@ -1,14 +1,6 @@
 <?php
 
-use Anthropic\Client;
-use GuzzleHttp\Client as GuzzleClient;
-use GuzzleHttp\Handler\MockHandler;
-use GuzzleHttp\HandlerStack;
-use GuzzleHttp\Middleware;
-use GuzzleHttp\Psr7\Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Psr\Http\Message\RequestInterface;
-use Psr\Http\Message\ResponseInterface;
 use Tests\TestCase;
 
 /*
@@ -55,54 +47,4 @@ expect()->extend('toBeOne', function () {
 function something()
 {
     // ..
-}
-
-/**
- * Swap the Claude client for one that answers with the given Messages API
- * responses, in order. Returns the requests it received.
- *
- * @return ArrayObject<int, array{request: RequestInterface}>
- */
-function fakeClaude(ResponseInterface ...$responses): ArrayObject
-{
-    $history = new ArrayObject;
-    $handler = HandlerStack::create(new MockHandler($responses));
-    $handler->push(Middleware::history($history));
-
-    app()->instance(Client::class, new Client(
-        apiKey: 'test-key',
-        requestOptions: ['transporter' => new GuzzleClient(['handler' => $handler]), 'maxRetries' => 0],
-    ));
-
-    return $history;
-}
-
-/**
- * Build a successful Messages API response with the given content blocks.
- *
- * @param  list<array<string, mixed>>  $content
- */
-function claudeReply(array $content, string $stopReason = 'end_turn'): ResponseInterface
-{
-    return new Response(200, ['Content-Type' => 'application/json'], (string) json_encode([
-        'id' => 'msg_'.fake()->uuid(),
-        'type' => 'message',
-        'role' => 'assistant',
-        'model' => 'claude-opus-5',
-        'content' => $content,
-        'stop_reason' => $stopReason,
-        'stop_sequence' => null,
-        'usage' => ['input_tokens' => 100, 'output_tokens' => 20],
-    ]));
-}
-
-/**
- * Decode the JSON body that was sent to the Messages API.
- *
- * @param  ArrayObject<int, array{request: RequestInterface}>  $history
- * @return array<string, mixed>
- */
-function claudeRequest(ArrayObject $history, int $index = 0): array
-{
-    return json_decode((string) $history[$index]['request']->getBody(), true);
 }

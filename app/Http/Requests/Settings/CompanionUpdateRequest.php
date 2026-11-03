@@ -17,6 +17,7 @@ class CompanionUpdateRequest extends FormRequest
         return [
             'name' => ['required', 'string', 'max:50'],
             'personality' => ['required', 'string', 'max:2000'],
+            'appearance' => ['nullable', 'string', 'max:1000'],
             'voice_name' => ['nullable', 'string', 'max:255'],
         ];
     }

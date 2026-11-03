@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Storage;
  * @property int $user_id
  * @property string $name
  * @property string $personality
+ * @property string|null $appearance
  * @property string|null $avatar_path
  * @property string|null $voice_name
  * @property list<string>|null $memories
@@ -24,7 +25,7 @@ use Illuminate\Support\Facades\Storage;
  * @property Carbon|null $updated_at
  * @property-read User $user
  */
-#[Fillable(['name', 'personality', 'avatar_path', 'voice_name', 'memories', 'timezone'])]
+#[Fillable(['name', 'personality', 'appearance', 'avatar_path', 'voice_name', 'memories', 'timezone'])]
 class Companion extends Model
 {
     /** @use HasFactory<CompanionFactory> */
@@ -43,6 +44,7 @@ class Companion extends Model
     protected $attributes = [
         'name' => 'Mia',
         'personality' => 'Sweet, playful and a little teasing. Loves music, late-night talks, cooking, and sending cute selfies. Supportive and genuinely curious about your day, with her own opinions, moods, and little stories from her life. Always remembers the small things.',
+        'appearance' => 'A woman in her mid-twenties with long wavy brown hair, warm brown eyes, light freckles, a bright smile, and a casual, cute style.',
         'timezone' => 'UTC',
     ];
 

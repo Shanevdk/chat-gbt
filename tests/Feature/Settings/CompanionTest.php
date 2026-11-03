@@ -27,6 +27,7 @@ test('her profile can be updated', function () {
         ->patch(route('companion.update'), [
             'name' => 'Luna',
             'personality' => 'Dry humor, loves astronomy.',
+            'appearance' => 'Short red hair and green eyes.',
             'voice_name' => 'Microsoft Aria Online (Natural)',
         ])
         ->assertSessionHasNoErrors()
@@ -35,6 +36,7 @@ test('her profile can be updated', function () {
     expect($companion->fresh())
         ->name->toBe('Luna')
         ->personality->toBe('Dry humor, loves astronomy.')
+        ->appearance->toBe('Short red hair and green eyes.')
         ->voice_name->toBe('Microsoft Aria Online (Natural)');
 });
 
@@ -61,6 +63,19 @@ test('her profile picture can be replaced', function () {
 
     Storage::assertExists($companion->fresh()->avatar_path);
     Storage::assertMissing('companions/avatars/old.jpg');
+});
+
+test('replacing her profile picture keeps it when a chat message shows it', function () {
+    Storage::fake();
+    Storage::put('companions/1/selfies/first.jpg', 'selfie');
+    $companion = Companion::factory()->create(['avatar_path' => 'companions/1/selfies/first.jpg']);
+    Message::factory()->for($companion)->fromCompanion()->create(['image_path' => 'companions/1/selfies/first.jpg']);
+
+    $this->actingAs($companion->user)
+        ->post(route('companion.avatar.update'), ['avatar' => UploadedFile::fake()->image('new.jpg')])
+        ->assertRedirect(route('companion.edit'));
+
+    Storage::assertExists('companions/1/selfies/first.jpg');
 });
 
 test('photos can be added to her camera roll', function () {

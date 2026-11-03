@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Settings\CompanionAvatarUpdateRequest;
 use App\Http\Requests\Settings\CompanionUpdateRequest;
 use App\Models\CompanionPhoto;
+use App\Models\Message;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -25,6 +26,7 @@ class CompanionController extends Controller
             'companion' => [
                 'name' => $companion->name,
                 'personality' => $companion->personality,
+                'appearance' => $companion->appearance,
                 'voice_name' => $companion->voice_name,
                 'avatar_url' => $companion->avatarUrl(),
                 'memories' => $companion->memories ?? [],
@@ -59,7 +61,7 @@ class CompanionController extends Controller
 
         $companion->update(['avatar_path' => $request->file('avatar')->store('companions/avatars')]);
 
-        if ($previousAvatarPath !== null) {
+        if ($previousAvatarPath !== null && Message::where('image_path', $previousAvatarPath)->doesntExist()) {
             Storage::delete($previousAvatarPath);
         }
 

@@ -26,6 +26,7 @@ type Props = {
     companion: {
         name: string;
         personality: string;
+        appearance: string | null;
         voice_name: string | null;
         avatar_url: string | null;
         memories: string[];
@@ -147,6 +148,25 @@ export default function CompanionSettings({ companion, photos }: Props) {
                             </div>
 
                             <div className="grid gap-2">
+                                <Label htmlFor="appearance">Appearance</Label>
+                                <textarea
+                                    id="appearance"
+                                    name="appearance"
+                                    defaultValue={companion.appearance ?? ''}
+                                    maxLength={1000}
+                                    rows={3}
+                                    className={fieldClassName}
+                                />
+                                <p className="text-xs text-muted-foreground">
+                                    What she looks like in the selfies she
+                                    takes. Her profile picture is used as a
+                                    reference, so she looks like the same person
+                                    every time.
+                                </p>
+                                <InputError message={errors.appearance} />
+                            </div>
+
+                            <div className="grid gap-2">
                                 <Label htmlFor="voice_name">Call voice</Label>
                                 <div className="flex gap-2">
                                     <select
@@ -198,7 +218,7 @@ export default function CompanionSettings({ companion, photos }: Props) {
                 <Heading
                     variant="small"
                     title="Camera roll"
-                    description="Photos she can send you. Describe each one so she knows when to send it."
+                    description="Optional. Real photos she can send instead of taking a new selfie. Describe each one so she knows when to send it."
                 />
 
                 <Form
